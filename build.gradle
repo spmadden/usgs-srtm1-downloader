@@ -25,6 +25,14 @@ sourceSets {
 	}
 }
 
+jar {
+	manifest {
+		attributes 'Implementation-Title': 'USGS-SRTM1-Downloader',
+					'Implementation-Version': '1.0-beta.1',
+					'Main-Class':'com.seanmadden.usgs.Main'
+	}
+}
+
 repositories {
     mavenCentral()
 }
