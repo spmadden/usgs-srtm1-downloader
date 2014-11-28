@@ -1,0 +1,65 @@
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'jacoco'
+
+configurations {
+    pmd
+}
+
+sourceSets {
+	main {
+		java {
+			srcDirs 'src/main'
+		}
+		resources {
+			srcDirs 'resources'
+		}
+	}
+	test {
+		java {
+			srcDirs 'src/tests'
+		}
+		resources {
+			srcDirs 'resources'
+		}
+	}
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+		pmd "net.sourceforge.pmd:pmd:5.0.1"
+        testCompile 'junit:junit:4.+'
+        compile 'log4j:log4j:1.+'
+        compile 'com.neuronrobotics:nrjavaserial:3.7.+'
+}
+
+check.dependsOn {pmdMain}
+
+task pmdMain << {
+	new File("$buildDir/reports/pmd").mkdirs()
+    ant.taskdef(name: 'pmd', classname: 'net.sourceforge.pmd.ant.PMDTask', classpath: configurations.pmd.asPath)
+    ant.pmd(
+    		shortFilenames: 'true', 
+    		failonruleviolation: 'false', 
+    		rulesetfiles: file('config/pmd/pmd.xml').toURI().toString(), 
+    		failuresPropertyName: 'pmdFailureCount'
+    		) {
+        formatter(type: 'xml', toFile: "$buildDir/reports/pmd/main.xml", toConsole: true)
+        fileset(dir: 'src/main')
+    }
+    ant.xslt(in: "$buildDir/reports/pmd/main.xml", style: "config/pmd/pmd-nicerhtml.xsl", out: "$buildDir/reports/pmd/main.html")
+    def failureCount = ant.properties["pmdFailureCount"]
+    println "$failureCount PMD rule violations were found. See the report at: $buildDir/reports/pmd/main.html"
+}
+
+jacocoTestReport
+{
+	reports
+	{
+		xml.enabled false
+		csv.enabled false
+	}
+}
