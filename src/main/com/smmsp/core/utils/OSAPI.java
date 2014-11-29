@@ -37,7 +37,7 @@ public final class OSAPI {
 	/**
 	 * The directory what we're going to store our files in
 	 */
-	public final static String CACHE_DIR_NAME = ".smmsp";
+	public final static String CACHE_DIR_NAME = ".usgs-downloader";
 	
 	public final static String OS_NAME = System.getProperty("os.name");
 	
