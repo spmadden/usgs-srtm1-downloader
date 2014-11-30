@@ -57,10 +57,12 @@ public final class OSAPI {
 			/**
 			 * The same as Windows 7
 			 */
+			@Override
 			public Path getCacheDirectory(){
 				return WINDOWS_7.getCacheDirectory();
-			};
+			}
 			
+			@Override
 			public boolean isThisOS(){
 				return "Windows 8".equals(OS_NAME) 
 						&& OS_VER.charAt(0) == '7';
@@ -68,6 +70,7 @@ public final class OSAPI {
 		},
 		
 		WINDOWS_7{
+			@Override
 			public Path getCacheDirectory(){
 				final String homeDirectory = System.getProperty("user.home");
 				
@@ -78,6 +81,7 @@ public final class OSAPI {
 						CACHE_DIR_NAME);
 			}
 			
+			@Override
 			public boolean isThisOS(){
 				return "Windows 7".equals(OS_NAME)
 						&& "6.1".equals(OS_VER);
@@ -88,10 +92,12 @@ public final class OSAPI {
 			/**
 			 * Same as windows 7
 			 */
+			@Override
 			public Path getCacheDirectory(){
 				return WINDOWS_7.getCacheDirectory();
 			}
 			
+			@Override
 			public boolean isThisOS(){
 				return "Windows Vista".equals(OS_NAME) 
 						&& OS_VER.charAt(0) == '6';
@@ -99,6 +105,7 @@ public final class OSAPI {
 		},
 		
 		WINDOWS_XP{
+			@Override
 			public Path getCacheDirectory(){
 				final String homeDir = System.getProperty("user.home");
 				
@@ -110,6 +117,7 @@ public final class OSAPI {
 						);
 			}
 			
+			@Override
 			public boolean isThisOS(){
 				return "Windows XP".equals(OS_NAME) 
 						&& OS_VER.charAt(0) == '5';
@@ -123,6 +131,7 @@ public final class OSAPI {
 		//ANDROID,
 		
 		LINUX{
+			@Override
 			public Path getCacheDirectory(){
 				final String homeDirectory = System.getProperty("user.home");
 				return FileSystems.getDefault().getPath(
@@ -137,6 +146,7 @@ public final class OSAPI {
 			 * hope to check them all).  Also we need a default if
 			 * we can't detect the OS and linux should be fairly standard.
 			 */
+			@Override
 			public boolean isThisOS(){
 				return true;
 			}

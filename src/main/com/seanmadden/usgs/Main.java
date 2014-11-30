@@ -28,30 +28,28 @@ package com.seanmadden.usgs;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.PrintStream;
-import java.net.CookieManager;
 import java.net.HttpCookie;
 import java.net.MalformedURLException;
-import java.net.URI;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.text.DecimalFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import javax.net.ssl.SSLSocketFactory;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.log4j.BasicConfigurator;
+import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
 import com.smmsp.core.net.HTTPConnection;
@@ -59,33 +57,52 @@ import com.smmsp.core.net.HTTPConnection.RequestMethod;
 import com.smmsp.core.net.HTTPResponse;
 
 /**
- * Primary entry point into the program.
+ * Primary entry point into the program. Downloads a series of SRTM1 DTED data
+ * based on the Settings.
  * 
  * @author Sean
  *
  */
 public class Main
 {
-	
+
+	/**
+	 * Logger
+	 */
 	protected static final Logger LOG = Logger.getLogger(Main.class);
 
+	/**
+	 * Download URL for the Earth Explorer
+	 */
 	protected static final String SRTM1_DOWNLOAD_URL = "http://earthexplorer.usgs.gov/download/8360/";
 
+	/**
+	 * Login URL for the Earth Explorer
+	 */
 	protected static final String LOGIN_URL = "https://earthexplorer.usgs.gov/login";
 
-	protected static final AtomicBoolean WAIT_FOR_LOGIN = new AtomicBoolean(
-			false);
+	/**
+	 * Rentrant Lock for logins
+	 */
+	protected static final ReentrantReadWriteLock LOGIN_LOCK = new ReentrantReadWriteLock();
 
+	/**
+	 * Series of cookies grabbed from the Login.
+	 */
 	protected static Map<String, String> LOGIN_COOKIES = new HashMap<>();
 
 	/**
-	 * @param args
+	 * Thread Pool for concurrent downloads
 	 */
+	protected static ExecutorService THREAD_POOL;
+
 	public static void main(String[] args)
 	{
+		// Default to the INFO level.
 		BasicConfigurator.configure();
+		Logger.getRootLogger().setLevel(Level.INFO);
 
-		if (!verifyProperties(System.out))
+		if (!verifyProperties(System.err))
 		{
 			System.out.println();
 			printUsage(System.out);
@@ -97,7 +114,8 @@ public class Main
 			printUsage(System.out);
 			return;
 		}
-		ExecutorService threadPool = Executors.newFixedThreadPool(
+
+		THREAD_POOL = Executors.newFixedThreadPool(
 				Settings.NUM_THREADS.getIntValue(), new ThreadFactory()
 				{
 					int num = 0;
@@ -105,73 +123,122 @@ public class Main
 					@Override
 					public Thread newThread(Runnable r)
 					{
-						return new Thread(r, "Downloader Thread " + num++);
+						Thread t = new Thread(r, "Downloader Thread " + num++);
+						t.setDaemon(true);
+						return t;
 					}
 				});
 
-		getLoginCookies();
-		downloadAllFiles();
+		downloadAllFilesThreaded();
+
+		THREAD_POOL.shutdown();
 	}
 
+	/**
+	 * Prints usage upon error.
+	 * 
+	 * @param out Where to print the useage
+	 */
 	private static void printUsage(PrintStream out)
 	{
 		out.println("Usage Instructions for USGS SRTM1 Downloader:");
 		out.println("\tjava {options} -jar usgs-srtm1-downloader.jar");
 		out.println();
 		out.println("Options:");
-		for (Settings setting : Settings.values())
+		Settings.consumeAllSettings(setting ->
 		{
 			out.println("\t -D" + setting.getName() + "={"
 					+ setting.getDescripton() + "}");
-		}
+		});
 		out.println();
 		out.println("Note:  You will need a USGS Earth Explorer Account.  Register at earthexplorer.usgs.gov");
 
 	}
 
+	/**
+	 * Verifies that all properties are valid, printing each that is not.
+	 * 
+	 * @param out The PrintStream to print errors to
+	 * @return True if all settings pass validation
+	 */
 	private static boolean verifyProperties(PrintStream out)
 	{
-		boolean good = true;
-
-		for (Settings setting : Settings.values())
-		{
-			if (!setting.verify())
-			{
-				good = false;
-				out.println("Missing or invalid value for: "
-						+ setting.getName());
-			}
-		}
-
-		return good;
+		return Settings
+				.checkAllSettings(
+						setting -> !setting.verify()
+								&& setting != Settings.CONFIG_FILE,
+						setting -> out.println("Missing or invalid value for: "
+								+ setting.getName()));
 	}
 
-	private static void downloadAllFiles()
+	/**
+	 * Download all files as described by Settings in a multi-threaded manner
+	 */
+	private static void downloadAllFilesThreaded()
 	{
 		int minLat = Settings.MIN_LAT.getIntValue();
 		int maxLat = Settings.MAX_LAT.getIntValue();
 		int minLon = Settings.MIN_LON.getIntValue();
 		int maxLon = Settings.MAX_LON.getIntValue();
 
-		for (int lat = minLat; lat <= maxLat; ++lat)
+		int startLat = Math.min(minLat, maxLat);
+		int endLat = Math.max(minLat, maxLat);
+		int startLon = Math.min(minLon, maxLon);
+		int endLon = Math.max(minLon, maxLon);
+
+		List<Future<Void>> futures = new LinkedList<>();
+
+		for (int lat = startLat; lat <= endLat; ++lat)
 		{
-			for (int lon = minLon; lon <= maxLon; ++lon)
+			for (int lon = startLon; lon <= endLon; ++lon)
 			{
-				downloadSingleFile(lat, lon);
+				futures.add(THREAD_POOL.submit(new SingleDownloaderCallable(
+						lat, lon)));
 			}
 		}
+
+		futures.forEach(future ->
+		{
+			try
+			{
+				future.get();
+			} catch (InterruptedException | ExecutionException e)
+			{
+				LOG.error("Unexpected error downloading file", e);
+			}
+		});
 	}
 
+	/**
+	 * 0. Does a double-checking synchronize against the Login lock to ensure
+	 * that we're the only thread waiting to LOGIN 1. Makes an initial request
+	 * to the /login to grab the PHPSESSID cookie 2. Makes a POST to the /login
+	 * with the username + password + cookies to get the last session cookies 3.
+	 * Saves the Session cookies in {@link #LOGIN_COOKIES}
+	 */
 	private static void getLoginCookies()
 	{
-		WAIT_FOR_LOGIN.set(true);
 
+		if (!LOGIN_LOCK.isWriteLocked())
+		{
+			synchronized (LOGIN_LOCK)
+			{
+				if (!LOGIN_LOCK.isWriteLocked())
+				{
+					LOGIN_LOCK.writeLock().lock();
+				}
+			}
+		}
+		if (!LOGIN_LOCK.isWriteLockedByCurrentThread())
+		{
+			return;
+		}
 		try
 		{
+			LOG.info("Attempting login...");
 			HTTPConnection conn = new HTTPConnection(LOGIN_URL);
 
 			Map<String, String> cookies = grabAllCookiesFromRequest(conn);
-			System.out.println(cookies);
 
 			conn = new HTTPConnection(LOGIN_URL, RequestMethod.POST);
 			conn.addFormField("username", Settings.USERNAME.getValue());
@@ -182,8 +249,8 @@ public class Main
 			for (String value : cookies.keySet())
 			{
 				LOGIN_COOKIES.put(value, cookies.get(value));
-				conn.addHeader("Cookie", cookies.get(value));
 			}
+			addCookies(conn);
 
 			cookies = grabAllCookiesFromRequest(conn);
 			for (String value : cookies.keySet())
@@ -194,27 +261,32 @@ public class Main
 		} catch (MalformedURLException e)
 		{
 			e.printStackTrace();
-		}
-
-		WAIT_FOR_LOGIN.set(false);
-		synchronized(WAIT_FOR_LOGIN)
+		} finally
 		{
-			WAIT_FOR_LOGIN.notifyAll();
+			LOGIN_LOCK.writeLock().unlock();
 		}
 
 	}
 
-	private static Map<String, String> grabAllCookiesFromRequest(HTTPConnection conn)
+	/**
+	 * Pulls all of the cookies in the request and returns them in a Key:Value
+	 * pairing
+	 * 
+	 * @param conn The connection to pull cookies form
+	 * @return A Key:Value map for all cookie values
+	 */
+	private static Map<String, String> grabAllCookiesFromRequest(
+			HTTPConnection conn)
 	{
 		HTTPResponse response = conn.getResponse();
-		
+
 		Map<String, List<String>> headers = response.getResponseHeaders();
-		
-		if(!headers.containsKey("Set-Cookie"))
+
+		if (!headers.containsKey("Set-Cookie"))
 		{
 			return null;
 		}
-		
+
 		List<String> cookies = headers.get("Set-Cookie");
 		Map<String, String> parsedCookies = new HashMap<>();
 		for (String cookie : cookies)
@@ -224,11 +296,18 @@ public class Main
 			{
 				parsedCookies.put(httpCookie.getName(), httpCookie.getValue());
 			}
-			
+
 		}
 		return parsedCookies;
 	}
 
+	/**
+	 * Creates the full Download URL for a particular Latitude and Longitude
+	 * 
+	 * @param lat Decimal Degrees Latitude WGS84
+	 * @param lon Decimal Degrees Longitude WGS84
+	 * @return the full URL for a particular lat and long
+	 */
 	private static String makeFileName(int lat, int lon)
 	{
 		// SRTM1N11W009V3
@@ -251,75 +330,143 @@ public class Main
 		return bld.toString();
 	}
 
-	private static void downloadSingleFile(int lat, int lon)
+	/**
+	 * Does all the hard work.
+	 * 
+	 * - Makes an initial request for the file - Follows all Header redirects
+	 * until we get to the file (*.dt2) -- If a redirect passes you to /login
+	 * again, attempts login. - Downloads that file to the current directory.
+	 * 
+	 * @param lat
+	 * @param lon
+	 */
+	protected static void downloadSingleFile(int lat, int lon)
 	{
 		String URL = makeFileName(lat, lon);
 		LOG.debug("Attempting download of file: " + URL);
 		try
 		{
-			while (WAIT_FOR_LOGIN.get())
+			HTTPConnection conn = new HTTPConnection(URL);
+			while (true)
 			{
+				Lock readLock = LOGIN_LOCK.readLock();
+				readLock.lock();
 				try
 				{
-					WAIT_FOR_LOGIN.wait();
-				} catch (InterruptedException e)
-				{
-					// no-op
-				}
-			}
+					addCookies(conn);
 
-			HTTPConnection conn = new HTTPConnection(URL);
-			while(true)
-			{
-				addCookies(conn);
-				HTTPResponse response = conn.getResponse();
-				
-				LOG.debug("Got response code: "+ response.getResponseCode());
-				Map<String, List<String>> headers = response.getResponseHeaders();
-				if(headers.containsKey("Location"))
+					String fileName = null;
+
+					long startTime = System.currentTimeMillis();
+					if (URL.contains(".dt2"))
+					{
+						fileName = URL.substring(URL.lastIndexOf('/') + 1,
+								URL.indexOf(".dt2") + 4);
+
+						LOG.info("Starting download of " + fileName);
+
+					}
+
+					HTTPResponse response = conn.getResponse();
+					LOG.debug("Got response code: "
+							+ response.getResponseCode());
+
+					Map<String, List<String>> headers = response
+							.getResponseHeaders();
+					if (headers.containsKey("Location"))
+					{
+						URL = headers.get("Location").get(0);
+
+						if (URL.startsWith("/login"))
+						{
+							if (!LOGIN_LOCK.isWriteLocked())
+							{
+								readLock.unlock();
+								getLoginCookies();
+								readLock.lock();
+							}
+							continue;
+						}
+
+						LOG.debug("Redirecting to: " + URL);
+						conn = new HTTPConnection(URL);
+						continue;
+					}
+
+					if (URL.contains(".dt2"))
+					{
+						long numBytes = Files.copy(response.getStream(),
+								new File(fileName).toPath(),
+								StandardCopyOption.REPLACE_EXISTING);
+
+						long deltaMillis = System.currentTimeMillis()
+								- startTime;
+						double avgSpeed = (numBytes / 1024.)
+								/ (deltaMillis / 1000.);
+						LOG.info("Finished download of " + fileName
+								+ " avg speed of " + avgSpeed + " kb/s");
+					}
+				} finally
 				{
-					URL = headers.get("Location").get(0);
-					LOG.debug("Redirecting to: " + URL);
-					conn = new HTTPConnection(URL);
-					continue;
+					readLock.unlock();
 				}
-				
-				if(URL.contains(".dt2"))
-				{
-					String fileName = URL.substring( URL.lastIndexOf('/')+1, URL.indexOf(".dt2") +4);
-					
-					Files.copy(response.getStream(), 
-							new File(fileName).toPath(), 
-							StandardCopyOption.REPLACE_EXISTING);
-				}
-				
-				
+
 				break;
 			}
-
 
 		} catch (IOException e)
 		{
 			LOG.error(e, e);
 		}
 	}
-	
+
+	/**
+	 * Adds all the Login Cookies to the HTTP connection specified by CONN
+	 * 
+	 * @param conn
+	 */
 	private static void addCookies(HTTPConnection conn)
 	{
 		StringBuffer buf = new StringBuffer();
 		Iterator<String> rator = LOGIN_COOKIES.keySet().iterator();
-		while(rator.hasNext())
+		while (rator.hasNext())
 		{
 			String key = rator.next();
 			buf.append(key);
 			buf.append("=");
 			buf.append(LOGIN_COOKIES.get(key));
-			if(rator.hasNext())
+			if (rator.hasNext())
 			{
 				buf.append("; ");
 			}
 		}
-		
+
 		conn.addHeader("Cookie", buf.toString());
+	}
+
+	/**
+	 * Calls downloadSingleFile in a concurrent manner.
+	 * 
+	 * @author Sean
+	 *
+	 */
+	protected static class SingleDownloaderCallable implements Callable<Void>
+	{
+		private int lat;
+		private int lon;
+
+		public SingleDownloaderCallable(int lat, int lon)
+		{
+			this.lat = lat;
+			this.lon = lon;
+		}
+
+		@Override
+		public Void call()
+		{
+			downloadSingleFile(lat, lon);
+			return null;
+		}
+
 	}
 }
